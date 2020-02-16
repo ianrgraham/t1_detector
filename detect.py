@@ -53,13 +53,10 @@ def _get_configuration_hoomd(s, r_func=hc.get_hoomd_bidisperse_r, dim=2, remove_
 
     #rad2 = rad2.view(np.ma.MaskedArray)
     box = s.configuration.box
-    print(box)
     box_mat = np.array([[box[0],box[0]*box[3]],[0.0,box[1]]], dtype=np.float64)
     pos = _apply_inverse_box(pos, box_mat) # brings us to a -1/2 to 1/2 box in both dimensions
     #box_mat = box_mat.T
-    print(box_mat)
-    print(np.max(pos[:,0]), np.min(pos[:,0]))
-    print(np.max(pos[:,1]), np.min(pos[:,1]))
+
 
     pos = pos.flatten() + 1 # since pos data is saved from -L/2 to L/2 originally, we want bring it to 0 to 1
 
@@ -72,6 +69,104 @@ def _get_configuration_hoomd(s, r_func=hc.get_hoomd_bidisperse_r, dim=2, remove_
         return (comp, embed, rad2, rattlers)
 
     return (comp, embed, rad2)
+
+def _get_voro_hoomd(s, r_func=hc.get_hoomd_bidisperse_r, dim=2):
+
+    assert(dim == 2)
+
+    pos = s.particles.position[:,:dim].astype(np.float64)
+    #pos = pos.view(np.ma.MaskedArray)
+    NP = len(pos)
+    rad2 = np.vectorize(r_func)(s.particles.typeid)**2
+
+    #rad2 = rad2.view(np.ma.MaskedArray)
+    box = s.configuration.box
+    box_mat = np.array([[box[0],box[0]*box[3]],[0.0,box[1]]], dtype=np.float64)
+    pos = _apply_inverse_box(pos, box_mat) # brings us to a -1/2 to 1/2 box in both dimensions
+    #box_mat = box_mat.T
+
+    pos = pos.flatten() + 1 # since pos data is saved from -L/2 to L/2 originally, we want bring it to 0 to 1
+    
+    voro = phom.Voronoi2D(NP, pos, rad2, np.asfortranarray(box_mat), True)
+    return voro
+
+def _get_centroid_diffs(voro, s):
+    box = s.configuration.box
+    cent = voro.get_cell_centroids()
+    cent = cent.reshape(len(cent)//2, 2)
+    embed = voro.get_embedding()
+    #out = np.zeros(len(cent))
+    out2 = np.zeros_like(cent)
+    for idx, c in enumerate(cent):
+        tmp = hc.PBC_LE(embed.get_pos(idx) - c, box)
+        #out[idx] = np.linalg.norm(tmp)
+        out2[idx] = tmp
+    return out2
+
+"""@njit 
+def LE_adjust(diff, box):
+    sub_dim = (diff > box[0]/2).astype(np.int64)
+    add_dim = (diff < -box[0]/2).astype(np.int64)
+    LE = (add_dim - sub_dim)[::-1]
+    LE[1:] = 0
+    diff += (add_dim - sub_dim + LE*box[3])*box[0]
+    return diff"""
+
+@njit
+def _delauney_calc(cdiffs, verts, pos, box):
+    # calculate area and divergence of vectors for each delauney triangle
+    areas = np.empty((len(verts)))
+    divs = np.empty((len(verts)))
+    for i in range(len(verts)):
+        v = verts[i]
+        tpos = np.empty((3,2))
+        tpos[0] = pos[v[0]]
+        for j in range(2):
+            diff = pos[v[j+1]] - pos[v[j]]
+            if (np.abs(diff) > box[0]/2).any():
+                # move particle j+1 closer to j
+                tpos[j+1] = tpos[j] + hc.PBC_LE(diff, box)
+            else:
+                tpos[j+1] = pos[v[j+1]]
+        # get area
+        areas[i] = 0.5*np.abs(tpos[0,0]*(tpos[1,1]-tpos[2,1]) + tpos[1,0]*(tpos[2,1]-tpos[0,1]) + tpos[2,0]*(tpos[0,1]-tpos[1,1]))
+        # get div
+        mat_b = np.empty((2,3))
+        mat_m = np.ones((3,3), dtype=np.float64)
+        for j in range(3):
+            mat_m[:2,j] = tpos[j]
+            mat_b[:,j] = cdiffs[v[j]]
+        mat_a = np.dot(mat_b,np.linalg.inv(mat_m))
+        divs[i] = mat_a[0,0] + mat_a[1,1] # trace (ignoring last column)
+    
+    return areas, divs
+
+def _get_Qks(voro, s):
+    diffs = _get_centroid_diffs(voro, s)
+    #embed = voro.embed
+    comp = voro.comp
+    
+    # need to look at older notebooks for how I can loop over delauney triangles
+
+    # loop over triangles, get areas, and calculate divergence of interpolated voro-centers
+
+    # for divergence, just integrate on boundary
+
+    #box_mat = embed.box_mat # need this?
+    #L = np.diagonal(box_mat)
+        
+    range_info = comp.dcell_range[2]
+    vertices = np.zeros((range_info[1]-range_info[0],3), dtype=np.int64)
+    # voronoi tesselation will aways have the same number of edges
+    
+    for idx, c in enumerate(range(*range_info)):
+        
+        vertices[idx] = np.array(list(voro.comp.get_faces(c, 0)), dtype=np.int64)
+
+    areas, divs = _delauney_calc(diffs, vertices, s.particles.position[:,:2], s.configuration.box)
+    Qk = divs*areas/np.mean(areas)
+    return Qk, vertices
+
 
 def _get_births_deaths(comp, embed, rad2, dim=-1):
     """Returns the births and deaths (as two lists) of components in the alpha complex generated from the given jamming state file at the given record.
@@ -92,7 +187,7 @@ def _get_births_deaths(comp, embed, rad2, dim=-1):
     elif embed.dim == 3:
         alpha_vals = phom.calc_alpha_vals_3D(comp, embed, rad2, alpha0=-r2norm)
         
-    filt = phom.construct_filtration(comp, alpha_vals, )
+    filt = phom.construct_filtration(comp, alpha_vals)
 
     pairs = phom.calc_persistence(filt, comp)
 
@@ -144,7 +239,7 @@ def alpha_complex_producer(gsd_file_root, r_func=hc.get_hoomd_bidisperse_r, dim=
             #print(i)
 
             # construct cell complex
-            comp, embed, rad2 = _get_configuration_hoomd(s)
+            comp, embed, rad2 = _get_configuration_hoomd(s, r_func=r_func)
 
             # save these three to disk
             out = pjoin(phom_dir, f"{i}_phom.pkl")
@@ -157,15 +252,42 @@ def alpha_complex_producer(gsd_file_root, r_func=hc.get_hoomd_bidisperse_r, dim=
             # if at a strobascopic step, produce persistence data
             birthDeath = _get_births_deaths(comp, embed, rad2)
             out = pjoin(phom_dir, f"{i}_bd")
-            #print(birthDeath.shape)
-            #print(birthDeath)
-            #sys.exit()
+
             np.savez_compressed(out, bd=birthDeath)
                 
             #save birthDeath to disk
 
+def voro_producer(gsd_file_root, r_func=hc.get_hoomd_bidisperse_r, dim=2):
+    # no need to make a class here, as procedure is pretty straight forward
+    # we're only going to attempt to produce data on quarter cycles
+    phom_dir = pjoin(gsd_file_root, "voro")
+    print(phom_dir)
+    os.makedirs(phom_dir, exist_ok=True)
+    traj = pjoin(gsd_file_root, 'traj.gsd')
+    with gsd.fl.open(name=traj, mode='rb') as f:
+        nframes = f.nframes
+
+    # infer SPP
+    SSPq = _get_SSPq(gsd_file_root)
+
+    with gsd.hoomd.open(name=traj, mode='rb') as f:
+        for i in range(0,nframes, 2*SSPq):
+            s = f[i]
+            #print(i)
+
+            # construct voronoi tesselation
+            voro = _get_voro_hoomd(s, r_func=r_func)
+
+            # obtain Q_k's
+            qks, verts = _get_Qks(voro, s)
+
+            out = pjoin(phom_dir, f"{i}_qks")
+
+            np.savez_compressed(out, qks=qks, verts=verts)
+
 
 def t1_analyzer():
     # this guy will later go over all alpha complex frames and check 
+    # 
     pass # TODO
     
