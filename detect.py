@@ -20,6 +20,8 @@ import numpy as np
 from numba import njit
 import pickle
 import numpy.ma
+import scipy.stats
+from collections import deque
 
 import sys
 import os
@@ -115,8 +117,8 @@ def LE_adjust(diff, box):
 @njit
 def _delauney_calc(cdiffs, verts, pos, box):
     # calculate area and divergence of vectors for each delauney triangle
-    areas = np.empty((len(verts)))
-    divs = np.empty((len(verts)))
+    areas = np.zeros((len(verts)))
+    divs = np.zeros((len(verts)))
     for i in range(len(verts)):
         v = verts[i]
         tpos = np.empty((3,2))
@@ -167,6 +169,14 @@ def _get_Qks(voro, s):
     Qk = divs*areas/np.mean(areas)
     return Qk, vertices
 
+def _get_delauney_edges(comp):
+    range_info = comp.dcell_range[1]
+    #edges = np.zeros((range_info[1]-range_info[0],2), dtype=np.int64)
+    edges = []
+    for idx, c in enumerate(range(*range_info)):
+        #edges[idx] = np.array(list(comp.get_faces(c, 0)), dtype=np.int64)
+        edges.append(frozenset(comp.get_faces(c, 0)))
+    return set(edges)
 
 def _get_births_deaths(comp, embed, rad2, dim=-1):
     """Returns the births and deaths (as two lists) of components in the alpha complex generated from the given jamming state file at the given record.
@@ -271,9 +281,14 @@ def voro_producer(gsd_file_root, r_func=hc.get_hoomd_bidisperse_r, dim=2):
     SSPq = _get_SSPq(gsd_file_root)
 
     with gsd.hoomd.open(name=traj, mode='rb') as f:
-        for i in range(0,nframes, 2*SSPq):
+        for i in range(0,nframes//SSPq*SSPq, 10):
             s = f[i]
-            #print(i)
+            print(i)
+            
+            out = pjoin(phom_dir, f"{i}_qks")
+
+            if os.path.exists(out+'.npz'):
+                continue
 
             # construct voronoi tesselation
             voro = _get_voro_hoomd(s, r_func=r_func)
@@ -281,13 +296,64 @@ def voro_producer(gsd_file_root, r_func=hc.get_hoomd_bidisperse_r, dim=2):
             # obtain Q_k's
             qks, verts = _get_Qks(voro, s)
 
-            out = pjoin(phom_dir, f"{i}_qks")
+            print(np.mean(qks), np.std(qks), scipy.stats.skew(qks))
 
             np.savez_compressed(out, qks=qks, verts=verts)
 
 
-def t1_analyzer():
-    # this guy will later go over all alpha complex frames and check 
-    # 
-    pass # TODO
+def t1_producer(gsd_file_root, r_func=hc.get_hoomd_bidisperse_r, dim=2):
+    # fetch complex
+    t1_dir = pjoin(gsd_file_root, "t1")
+    print(t1_dir)
+    os.makedirs(t1_dir, exist_ok=True)
+    traj = pjoin(gsd_file_root, 'traj.gsd')
+    with gsd.fl.open(name=traj, mode='rb') as f:
+        nframes = f.nframes
+
+    # infer SPP
+    SSPq = _get_SSPq(gsd_file_root)
+
+    edge_deque = deque([], maxlen=5)
+    
+    with gsd.hoomd.open(name=traj, mode='rb') as f:
+        for i in range(0,nframes, SSPq):
+            s = f[i]
+            comp, embed, rad2 = _get_configuration_hoomd(s, r_func=r_func)
+            # iterate over "bonds"
+            # save list to memory
+            edges = _get_delauney_edges(comp)
+            edge_deque.append(edges)
+
+            idx = i - 4*SSPq
+            out = pjoin(t1_dir, f"{idx}_t1s")
+
+            if os.path.exists(out+'.npz'):
+                continue
+
+            if len(edge_deque) == 5:
+                t1_events = []
+                reversed = []
+                irreversed = []
+                first_edges = edge_deque[0]
+                final_edges = edges
+                for j in range(1,4):
+                    comp_edges = edge_deque[j]
+                    for edge in first_edges:
+                        if edge not in comp_edges:
+                            if edge not in t1_events:
+                                t1_events.append(edge)
+                for t1 in t1_events:
+                    if t1 in final_edges:
+                        reversed.append(t1)
+                    else:
+                        irreversed.append(t1)
+
+                nparr_edges = numpy.array([list(c) for c in final_edges]) # converts set of frozen sets to nparray
+                reversed = np.array([list(c) for c in reversed])
+                irreversed = np.array([list(c) for c in irreversed])
+
+                
+
+                np.savez_compressed(out, rev=reversed, irrev=irreversed, edges=nparr_edges)
+                
     

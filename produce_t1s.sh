@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=bd_prod
+#SBATCH --job-name=t1_prod
 #SBATCH --output=/data1/shared/igraham/output/quasi_modes/%A-%a.out
 #SBATCH --time=1-00:00:00
 #SBATCH --threads-per-core=1
@@ -28,4 +28,4 @@ fi
 cd /home1/igraham/Projects/t1_detector
 root=/home1/igraham/Projects/hoomd_test
 dir=`sed "${NUM}q;d" ../quasilocalized_modes/process_files.txt`
-/home1/igraham/anaconda3/envs/softmatter/bin/python job.py -d ${root}/${dir}
+/home1/igraham/anaconda3/envs/softmatter/bin/python produce_t1s.py -d ${root}/${dir}
