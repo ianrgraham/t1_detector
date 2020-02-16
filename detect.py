@@ -22,6 +22,7 @@ import pickle
 import numpy.ma
 import scipy.stats
 from collections import deque
+import netCDF4
 
 import sys
 import os
@@ -92,8 +93,35 @@ def _get_voro_hoomd(s, r_func=hc.get_hoomd_bidisperse_r, dim=2):
     voro = phom.Voronoi2D(NP, pos, rad2, np.asfortranarray(box_mat), True)
     return voro
 
+def _get_voro_nc(state, index, dim=2):
+    assert(dim == 2)
+
+    NP = len(state.dimensions['NP'])
+
+    pos = state.variables['pos'][index]
+
+    rad2 = state.variables['rad'][index]**2
+
+    box_mat = np.array(state.variables['BoxMatrix'][index].reshape((dim, dim))).T
+    
+    voro = phom.Voronoi2D(NP, pos, rad2, box_mat, True)
+    return voro
+
 def _get_centroid_diffs(voro, s):
     box = s.configuration.box
+    cent = voro.get_cell_centroids()
+    cent = cent.reshape(len(cent)//2, 2)
+    embed = voro.get_embedding()
+    #out = np.zeros(len(cent))
+    out2 = np.zeros_like(cent)
+    for idx, c in enumerate(cent):
+        tmp = hc.PBC_LE(embed.get_pos(idx) - c, box)
+        #out[idx] = np.linalg.norm(tmp)
+        out2[idx] = tmp
+    return out2
+
+def _get_centroid_diffs_box(voro, box):
+    #box = s.configuration.box
     cent = voro.get_cell_centroids()
     cent = cent.reshape(len(cent)//2, 2)
     embed = voro.get_embedding()
@@ -166,6 +194,36 @@ def _get_Qks(voro, s):
         vertices[idx] = np.array(list(voro.comp.get_faces(c, 0)), dtype=np.int64)
 
     areas, divs = _delauney_calc(diffs, vertices, s.particles.position[:,:2], s.configuration.box)
+    Qk = divs*areas/np.mean(areas)
+    return Qk, vertices
+
+def _get_Qks_nc(voro, s, index):
+    pos = s.variables['pos'][index,:]
+    pos = pos.reshape(len(pos)//2, 2)
+    tmpbox = s.variables['BoxMatrix'][index,:]
+    box = np.array([tmpbox[0], tmpbox[0], 1, tmpbox[1]/tmpbox[0]])
+    diffs = _get_centroid_diffs_box(voro, box)
+    #embed = voro.embed
+    comp = voro.comp
+    
+    # need to look at older notebooks for how I can loop over delauney triangles
+
+    # loop over triangles, get areas, and calculate divergence of interpolated voro-centers
+
+    # for divergence, just integrate on boundary
+
+    #box_mat = embed.box_mat # need this?
+    #L = np.diagonal(box_mat)
+        
+    range_info = comp.dcell_range[2]
+    vertices = np.zeros((range_info[1]-range_info[0],3), dtype=np.int64)
+    # voronoi tesselation will aways have the same number of edges
+    
+    for idx, c in enumerate(range(*range_info)):
+        
+        vertices[idx] = np.array(list(voro.comp.get_faces(c, 0)), dtype=np.int64)
+
+    areas, divs = _delauney_calc(diffs, vertices, pos, box)
     Qk = divs*areas/np.mean(areas)
     return Qk, vertices
 
@@ -355,5 +413,143 @@ def t1_producer(gsd_file_root, r_func=hc.get_hoomd_bidisperse_r, dim=2):
                 
 
                 np.savez_compressed(out, rev=reversed, irrev=irreversed, edges=nparr_edges)
-                
+
+def _nc_good(data_root):
+    d = netCDF4.Dataset(data_root, 'r')
+    p2c = d.variables['periods_to_cycle'][:][0]
+    cl = d.variables['cycle_length'][:][0]
     
+    if p2c < 0 or cl != 1:
+        d.close()
+        return False
+    else:
+        d.close()
+        return True
+    
+
+def t1_producer_nc(nc_state, dim=2):
+    # fetch complex
+    t1_dir = pjoin(nc_state.replace("_state.nc","/other"), "t1")
+    if not _nc_good(nc_state.replace("_state.nc","_data.nc")):
+        return
+    print(t1_dir)
+    os.makedirs(t1_dir, exist_ok=True)
+    # init netcdf state
+    # infer SPP
+    #SSPq = _get_SSPq(gsd_file_root) SSPq will always be 25 for these packings
+    SSPq = 25
+
+    edge_deque = deque([], maxlen=5)
+    
+    s = netCDF4.Dataset(nc_state, 'r')
+    nframes = len(s.dimensions['rec'])
+    for i in range(0,nframes, SSPq):
+        
+        embed, rad2 = tri.get_configuration(s, i)
+        comp =  tri.construct_triangulation(embed, rad2)
+        # iterate over "bonds"
+        # save list to memory
+        edges = _get_delauney_edges(comp)
+        edge_deque.append(edges)
+
+        idx = i - 4*SSPq
+        out = pjoin(t1_dir, f"{idx}_t1s")
+
+        if os.path.exists(out+'.npz'):
+            continue
+
+        if len(edge_deque) == 5:
+            t1_events = []
+            reversed = []
+            irreversed = []
+            first_edges = edge_deque[0]
+            final_edges = edges
+            for j in range(1,4):
+                comp_edges = edge_deque[j]
+                for edge in first_edges:
+                    if edge not in comp_edges:
+                        if edge not in t1_events:
+                            t1_events.append(edge)
+            for t1 in t1_events:
+                if t1 in final_edges:
+                    reversed.append(t1)
+                else:
+                    irreversed.append(t1)
+
+            nparr_edges = numpy.array([list(c) for c in final_edges]) # converts set of frozen sets to nparray
+            reversed = np.array([list(c) for c in reversed])
+            irreversed = np.array([list(c) for c in irreversed])
+
+            
+
+            np.savez_compressed(out, rev=reversed, irrev=irreversed, edges=nparr_edges)
+    s.close()
+            
+
+def voro_producer_nc(nc_state, dim=2):
+    # no need to make a class here, as procedure is pretty straight forward
+    # we're only going to attempt to produce data on quarter cycles
+    phom_dir = pjoin(nc_state.replace("_state.nc","/other"), "voro")
+    if not _nc_good(nc_state.replace("_state.nc","_data.nc")):
+        return
+    os.makedirs(phom_dir, exist_ok=True)
+    
+    s = netCDF4.Dataset(nc_state, 'r')
+    nframes = len(s.dimensions['rec'])
+    #SSPq = 25
+
+    #with gsd.hoomd.open(name=traj, mode='rb') as f:
+    for i in range(0,nframes):
+        #s = f[i]
+        #print(i)
+        
+        out = pjoin(phom_dir, f"{i}_qks")
+
+        if os.path.exists(out+'.npz'):
+            continue
+
+        # construct voronoi tesselation
+        voro = _get_voro_nc(s, i)
+
+        # obtain Q_k's
+        qks, verts = _get_Qks_nc(voro, s, i)
+
+        print(np.mean(qks), np.std(qks), scipy.stats.skew(qks))
+
+        np.savez_compressed(out, qks=qks, verts=verts)
+    
+def alpha_complex_producer_nc(nc_state, dim=2):
+    # no need to make a class here, as procedure is pretty straight forward
+    # we're only going to attempt to produce data on quarter cycles
+    phom_dir = pjoin(nc_state.replace("_state.nc","/other"), "phom")
+    if not _nc_good(nc_state.replace("_state.nc","_data.nc")):
+        return
+    os.makedirs(phom_dir, exist_ok=True)
+    
+    s = netCDF4.Dataset(nc_state, 'r')
+    nframes = len(s.dimensions['rec'])
+
+    # infer SPP
+    #SSPq = _get_SSPq(gsd_file_root)
+    SSPq = 25
+
+    
+    for i in range(0,nframes, SSPq):
+        embed, rad2 = tri.get_configuration(s, i)
+        comp =  tri.construct_triangulation(embed, rad2)
+
+        # save these three to disk
+        # out = pjoin(phom_dir, f"{i}_phom.pkl")
+        # so it appears we can't save the complex object
+        # I guess our best chance is to save all of the dealauney pairs at each quarter cycle frame
+        #with open(out, 'wb') as f:
+        #    pickle.dump({"comp":comp,"embed":embed,"rad2":rad2}, f)
+
+        #if i % 2*SSPq == 0:
+        # if at a strobascopic step, produce persistence data
+        birthDeath = _get_births_deaths(comp, embed, rad2)
+        out = pjoin(phom_dir, f"{i}_bd")
+
+        np.savez_compressed(out, bd=birthDeath)
+            
+        #save birthDeath to disk
