@@ -26,6 +26,6 @@ fi
 # execute c++ code for all files with N=2048
 # mkdir -p /data1/shared/igraham/datasets/fast_sim2
 cd /home1/igraham/Projects/t1_detector
-root=/home1/igraham/Projects/hoomd_test
+root=/data1/shared/igraham/datasets/new_memory
 dir=`sed "${NUM}q;d" 2048_files.txt`
 /home1/igraham/anaconda3/envs/softmatter/bin/python produce_bd_nc.py -d ${root}/${dir}
