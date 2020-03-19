@@ -28,10 +28,22 @@ import hessian_calc as hc
 from collections import defaultdict
 
 @njit
-def is_gapped(comp, embed, rad, ):
+def is_gapped(comp, embed, rad, verts, box):
+    
     pass
 
-def find_voids(comp, embed, rad):
+
+def get_void_tree(v, edges2cells, cells2edges):
+    tmp_v = []
+    while True:
+        
+        edges = cells2edges[v]
+        # need to make this a recursive call
+        for e in edges:
+            for v2 in edges2cells[e]:
+                if v != v2:
+
+def find_voids(comp, embed, rad, box):
 
     edges2cells = defaultdict([])
     cells2edges = defaultdict([])
@@ -43,7 +55,7 @@ def find_voids(comp, embed, rad):
     #       add cell id to voids, value append edge id
     edge_range = comp.dcell_range[1]
     for e in range(*edge_range):
-        if is_gapped(comp, embed, rad, e):
+        if is_gapped(comp, embed, rad, comp.get_faces(e, 0), box):
             cells = comp.get_cofaces(e)
             edges2cells[e].extend(cells)
             for c in cells:
@@ -57,11 +69,14 @@ def find_voids(comp, embed, rad):
     #       find voids not equal to main void
     #       for cells in new void
     skip = []
+    voids = []
     for v in cells2edges.keys:
         if v not in skip:
+            tmp_v = []
             edges = cells2edges[v]
             # need to make this a recursive call
             for e in edges:
-                for v in edges2cells[e]:
+                for v2 in edges2cells[e]:
+                    if v != v2:
 
     # return list of voids (list of list of delauney cell ids)

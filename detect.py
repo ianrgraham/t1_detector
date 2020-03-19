@@ -115,7 +115,7 @@ def _get_centroid_diffs(voro, s):
     #out = np.zeros(len(cent))
     out2 = np.zeros_like(cent)
     for idx, c in enumerate(cent):
-        tmp = hc.PBC_LE(embed.get_pos(idx) - c, box)
+        tmp = hc.PBC_LE(c - embed.get_pos(idx), box)
         #out[idx] = np.linalg.norm(tmp)
         out2[idx] = tmp
     return out2
@@ -128,7 +128,7 @@ def _get_centroid_diffs_box(voro, box):
     #out = np.zeros(len(cent))
     out2 = np.zeros_like(cent)
     for idx, c in enumerate(cent):
-        tmp = hc.PBC_LE(embed.get_pos(idx) - c, box)
+        tmp = hc.PBC_LE(c - embed.get_pos(idx), box)
         #out[idx] = np.linalg.norm(tmp)
         out2[idx] = tmp
     return out2
