@@ -16,6 +16,7 @@ paths = ("/data1/shared/igraham/lib_persistent_homology/python_src:"
 
 import sys
 import os
+import numpy as np
 for p in paths:
     sys.path.insert(0,p)
 
@@ -24,26 +25,46 @@ pjoin = os.path.join
 import phom
 import triangulation as tri
 import hessian_calc as hc
+import detect as dt
 
 from collections import defaultdict
 
-@njit
-def is_gapped(comp, embed, rad, verts, box):
-    
-    pass
+#@njit
+def is_gapped(comp, embed, rad, e):
 
+    box_mat = embed.box_mat
+    L = np.diagonal(box_mat)
 
-def get_void_tree(v, edges2cells, cells2edges):
-    tmp_v = []
-    while True:
+    (vi, vj) = comp.get_facets(e)
         
-        edges = cells2edges[v]
-        # need to make this a recursive call
-        for e in edges:
+    vposi = embed.get_vpos(vi)
+    vposj = embed.get_vpos(vj)
+    
+    vbvec = embed.get_vdiff(vposi, vposj)
+    bvec = box_mat.dot(vbvec)
+
+    if np.linalg.norm(bvec) < rad[vi] + rad[vj]:
+        return True
+    else:
+        return False
+
+
+def get_void_tree(v, edges2cells, cells2edges, first=False, olde=[]):
+    tmp_v = []
+        
+    edges = cells2edges[v]
+    for e in edges:
+        if e not in olde:
+            olde.append(e)
             for v2 in edges2cells[e]:
                 if v != v2:
+                    tmp_v.append(v2)
+                    tmp_v.extend(get_void_tree(v2, edges2cells, cells2edges, olde=olde))
+    if first:
+        tmp_v.append(v)
+    return tmp_v
 
-def find_voids(comp, embed, rad, box):
+def find_voids(comp, embed, rad):
 
     edges2cells = defaultdict([])
     cells2edges = defaultdict([])
@@ -55,7 +76,7 @@ def find_voids(comp, embed, rad, box):
     #       add cell id to voids, value append edge id
     edge_range = comp.dcell_range[1]
     for e in range(*edge_range):
-        if is_gapped(comp, embed, rad, comp.get_faces(e, 0), box):
+        if is_gapped(comp, embed, rad, e):
             cells = comp.get_cofaces(e)
             edges2cells[e].extend(cells)
             for c in cells:
@@ -72,11 +93,27 @@ def find_voids(comp, embed, rad, box):
     voids = []
     for v in cells2edges.keys:
         if v not in skip:
-            tmp_v = []
-            edges = cells2edges[v]
-            # need to make this a recursive call
-            for e in edges:
-                for v2 in edges2cells[e]:
-                    if v != v2:
+            voids.append(get_void_tree(v, cells2edges, edges2cells, first=True))
+            skip.extend(voids[-1])
 
     # return list of voids (list of list of delauney cell ids)
+    return voids
+
+def void_qk(comp, embed, rad):
+
+    # fetch Qk
+
+    # fetch voids
+    voids = find_voids(comp, embed, rad)
+
+
+def hoomd_get_void_qk(gsd_file_root, i, r_func=hc.get_hoomd_bidisperse_r, dim=2):
+
+    traj = pjoin(gsd_file_root, 'traj.gsd')
+    # obtain Q_k's
+    with gsd.hoomd.open(name=traj, mode='rb') as f:
+        s = f[i]
+        voro = dt._get_voro_hoomd(s, r_func=r_func)
+        rad = np.vectorize(r_func)(s.particles.typeid)
+        qks, _ = dt._get_Qks(voro, s)
+        
